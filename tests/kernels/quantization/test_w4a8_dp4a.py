@@ -138,3 +138,55 @@ def test_layer_apply_padding_and_fallback(bs):
     else:
         ref = x.float() @ w_deq.t()
     torch.testing.assert_close(out.float(), ref, rtol=3e-2, atol=2e-1)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only checks")
+def test_w4a16_kernels_reject_int8_activations():
+    """A config that asks for int8 activations must never land on a
+    weight-only executor (issue #38064)."""
+    from vllm.model_executor.kernels.linear.mixed_precision.humming import (
+        HummingLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.scalar_type import scalar_types
+
+    cfg = MPLinearLayerConfig(
+        full_weight_shape=(4096, 4096),
+        partition_weight_shape=(4096, 4096),
+        weight_type=scalar_types.int4,
+        act_type=torch.int8,
+        group_size=GROUP,
+        zero_points=False,
+        has_g_idx=False,
+    )
+    ok, reason = HummingLinearKernel.can_implement(cfg)
+    assert not ok
+    assert "int8" in (reason or "")
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only checks")
+def test_int8_selection_fails_cleanly_off_ampere():
+    """On capabilities without an int8-activation kernel the chooser raises,
+    which the scheme converts into a warned W4A16 fallback."""
+    from vllm.model_executor.kernels.linear import choose_mp_linear_kernel
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.scalar_type import scalar_types
+
+    cfg = MPLinearLayerConfig(
+        full_weight_shape=(4096, 4096),
+        partition_weight_shape=(4096, 4096),
+        weight_type=scalar_types.int4,
+        act_type=torch.int8,
+        group_size=GROUP,
+        zero_points=False,
+        has_g_idx=False,
+    )
+    if 80 <= CAP < 90:
+        assert choose_mp_linear_kernel(cfg, compute_capability=CAP) is not None
+    else:
+        with pytest.raises(ValueError):
+            choose_mp_linear_kernel(cfg, compute_capability=CAP)

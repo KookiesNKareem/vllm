@@ -12,6 +12,7 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 _GROUP_SIZE = 128
 _MAX_GEMV_BATCH = 8
+_DEQUANT_WORKSPACE_BYTES = 64 * 1024 * 1024
 
 
 def _pack_w4(weight: torch.Tensor) -> torch.Tensor:
@@ -68,6 +69,10 @@ class Dp4aW4A8LinearKernel(MPLinearKernel):
             self.w_s_name,
             lambda s: (s.data.to(torch.float32) / 16.0).to(s.dtype),
         )
+        # the scheme registers the unpacked int8 weight under a second name;
+        # drop it so the full [N, K] tensor is not kept resident
+        if self.w_q_name != "weight" and getattr(layer, "weight", None) is not None:
+            delattr(layer, "weight")
 
     def apply_weights(
         self,
@@ -93,11 +98,18 @@ class Dp4aW4A8LinearKernel(MPLinearKernel):
             ops.w4a8_dp4a_gemm(out, x_q, x_s.view(-1).float(), w_q, w_s)
             out = out[:bs]
         else:
-            w_fp = torch.empty(
-                w_q.shape[0], w_q.shape[1] * 8, dtype=x.dtype, device=x.device
-            )
-            ops.w4a8_dp4a_dequant(w_fp, w_q, w_s)
-            out = torch.mm(x2d, w_fp.t())
+            # Prefill / large batches: dequantize in bounded tiles and use a
+            # dense GEMM. Weight-only execution here is numerically at least
+            # as accurate as the scheme's int8-activation contract.
+            n, k = w_q.shape[0], w_q.shape[1] * 8
+            out = torch.empty(bs, n, dtype=x.dtype, device=x.device)
+            tile_n = max(_GROUP_SIZE, min(n, _DEQUANT_WORKSPACE_BYTES // (2 * k)))
+            w_tile = torch.empty(tile_n, k, dtype=x.dtype, device=x.device)
+            for n0 in range(0, n, tile_n):
+                n1 = min(n, n0 + tile_n)
+                tile = w_tile[: n1 - n0]
+                ops.w4a8_dp4a_dequant(tile, w_q[n0:n1], w_s[n0:n1])
+                torch.mm(x2d, tile.t(), out=out[:, n0:n1])
 
         if bias is not None:
             out.add_(bias)

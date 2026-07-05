@@ -13,6 +13,8 @@
  * Licensed under the Apache License, Version 2.0.
  */
 
+#ifndef USE_ROCM
+
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
@@ -22,6 +24,7 @@
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
 
 #include "libtorch_stable/torch_utils.h"
 
@@ -248,6 +251,8 @@ void launch(const torch::stable::Tensor& b_q,
         (const float*)a_scales.const_data_ptr(),
         (const T*)b_scales.const_data_ptr(), (T*)out.mutable_data_ptr(), N, K,
         tk);
+    STD_TORCH_CHECK(cudaGetLastError() == cudaSuccess,
+                    "w4a8_dp4a_gemm launch failed");
   };
   using one = std::integral_constant<int, 1>;
   using two = std::integral_constant<int, 2>;
@@ -285,12 +290,32 @@ void w4a8_dp4a_gemm(torch::stable::Tensor& out,
   STD_TORCH_CHECK(K % w4a8_dp4a::kGroup == 0, "K must be a multiple of 128");
   STD_TORCH_CHECK(bs == 1 || bs == 2 || bs == 4 || bs == 8,
                   "batch must be padded to 1/2/4/8, got ", bs);
+  STD_TORCH_CHECK(a_q.scalar_type() == torch::headeronly::ScalarType::Char,
+                  "a_q must be int8");
+  STD_TORCH_CHECK(b_q.scalar_type() == torch::headeronly::ScalarType::Int,
+                  "b_q must be int32");
   STD_TORCH_CHECK(b_q.size(1) == K / 8, "b_q must be [N, K/8] int32");
   STD_TORCH_CHECK(
       a_scales.scalar_type() == torch::headeronly::ScalarType::Float,
       "a_scales must be float32");
+  STD_TORCH_CHECK(a_scales.numel() >= bs, "a_scales must have >= bs entries");
+  STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half ||
+                      out.scalar_type() ==
+                          torch::headeronly::ScalarType::BFloat16,
+                  "out must be fp16 or bf16");
+  STD_TORCH_CHECK(out.scalar_type() == b_scales.scalar_type(),
+                  "out and b_scales dtypes must match");
+  STD_TORCH_CHECK(out.size(0) == bs && out.size(1) == N,
+                  "out must be [bs, N]");
+  STD_TORCH_CHECK(b_scales.size(0) == N &&
+                      b_scales.size(1) == K / w4a8_dp4a::kGroup,
+                  "b_scales must be [N, K/128]");
+  STD_TORCH_CHECK(a_q.is_contiguous() && b_q.is_contiguous() &&
+                      b_scales.is_contiguous() && out.is_contiguous(),
+                  "all tensors must be contiguous");
 
   const auto device_index = a_q.get_device_index();
+  const torch::stable::accelerator::DeviceGuard device_guard(device_index);
   const cudaStream_t stream = get_current_cuda_stream(device_index);
   if (out.scalar_type() == torch::headeronly::ScalarType::Half) {
     w4a8_dp4a::launch<half>(b_q, a_q, a_scales, b_scales, out, bs, N, K,
@@ -306,7 +331,14 @@ void w4a8_dp4a_dequant(torch::stable::Tensor& out,
                        const torch::stable::Tensor& b_scales) {
   const int N = b_q.size(0);
   const int K = b_q.size(1) * 8;
+  STD_TORCH_CHECK(b_q.scalar_type() == torch::headeronly::ScalarType::Int,
+                  "b_q must be int32");
+  STD_TORCH_CHECK(out.scalar_type() == b_scales.scalar_type(),
+                  "out and b_scales dtypes must match");
+  STD_TORCH_CHECK(out.size(0) == N && out.size(1) == K,
+                  "out must be [N, K]");
   const auto device_index = b_q.get_device_index();
+  const torch::stable::accelerator::DeviceGuard device_guard(device_index);
   const cudaStream_t stream = get_current_cuda_stream(device_index);
   dim3 grid((K / 8 + 255) / 256, N);
   if (out.scalar_type() == torch::headeronly::ScalarType::Half) {
@@ -320,9 +352,13 @@ void w4a8_dp4a_dequant(torch::stable::Tensor& out,
         (const nv_bfloat16*)b_scales.const_data_ptr(),
         (nv_bfloat16*)out.mutable_data_ptr(), N, K);
   }
+  STD_TORCH_CHECK(cudaGetLastError() == cudaSuccess,
+                  "w4a8_dp4a_dequant launch failed");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("w4a8_dp4a_gemm", TORCH_BOX(&w4a8_dp4a_gemm));
   m.impl("w4a8_dp4a_dequant", TORCH_BOX(&w4a8_dp4a_dequant));
 }
+
+#endif  // !USE_ROCM

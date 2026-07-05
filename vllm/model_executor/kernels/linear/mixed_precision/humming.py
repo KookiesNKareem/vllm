@@ -25,6 +25,10 @@ class HummingLinearKernel(MPLinearKernel):
             return False, "Humming does not support act-order (g_idx)"
         if c.zero_points:
             return False, "Humming linear kernel only supports symmetric weights"
+        if c.act_type == torch.int8:
+            # Humming executes activations at 16-bit; accepting an int8
+            # activation config would silently drop the quantization.
+            return False, "Humming does not quantize activations to int8"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
