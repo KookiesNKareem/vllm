@@ -39,6 +39,9 @@ from vllm.model_executor.kernels.linear.mixed_precision.cpu import (
 from vllm.model_executor.kernels.linear.mixed_precision.cutlass import (
     CutlassW4A8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.dp4a import (
+    Dp4aW4A8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.dynamic_4bit import (
     Dynamic4bitLinearKernel,
 )
@@ -370,6 +373,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         CutlassW4A8LinearKernel,
         MacheteLinearKernel,
         AllSparkLinearKernel,
+        Dp4aW4A8LinearKernel,
         MarlinLinearKernel,
         HummingLinearKernel,
         ConchLinearKernel,

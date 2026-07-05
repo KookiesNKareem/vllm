@@ -1166,6 +1166,26 @@ def marlin_int4_fp8_preprocess(
     return torch.ops._C.marlin_int4_fp8_preprocess(qweight, qzeros_or_none, inplace)
 
 
+def w4a8_dp4a_gemm(
+    out: torch.Tensor,
+    a_q: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_q: torch.Tensor,
+    b_scales: torch.Tensor,
+) -> None:
+    """Decode W4A8 GEMM (dp4a): out[bs, N] = a_scales * (a_q @ dequant(b_q))."""
+    torch.ops._C.w4a8_dp4a_gemm(out, a_q, a_scales, b_q, b_scales)
+
+
+def w4a8_dp4a_dequant(
+    out: torch.Tensor,
+    b_q: torch.Tensor,
+    b_scales: torch.Tensor,
+) -> None:
+    """Dequantize dp4a-packed int4 weights to fp16/bf16 [N, K]."""
+    torch.ops._C.w4a8_dp4a_dequant(out, b_q, b_scales)
+
+
 def marlin_gemm(
     a: torch.Tensor,
     c: torch.Tensor | None,

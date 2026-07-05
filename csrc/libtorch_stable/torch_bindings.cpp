@@ -80,6 +80,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       ") -> Tensor");
   // conditionally compiled so impl registration is in source file
 
+  // dp4a W4A8 decode GEMM (Ampere) and its dequant fallback
+  ops.def(
+      "w4a8_dp4a_gemm(Tensor! out, Tensor a_q, Tensor a_scales, "
+      "Tensor b_q, Tensor b_scales) -> ()");
+  // conditionally compiled so impl registrations are in source file
+  ops.def(
+      "w4a8_dp4a_dequant(Tensor! out, Tensor b_q, Tensor b_scales) -> ()");
+  // conditionally compiled so impl registrations are in source file
+
   // Marlin GEMM
   ops.def(
       "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
