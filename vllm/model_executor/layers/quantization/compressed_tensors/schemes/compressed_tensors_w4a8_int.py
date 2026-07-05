@@ -5,6 +5,8 @@ from collections.abc import Callable
 
 import torch
 
+from vllm.platforms import current_platform
+
 from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -89,20 +91,49 @@ class CompressedTensorsW4A8Int(CompressedTensorsScheme):
         repeat_scales = is_channelwise and row_parallel
         partition_scales = not repeat_scales
 
-        mp_linear_kernel_config = MPLinearLayerConfig(
-            full_weight_shape=(input_size, output_size),
-            partition_weight_shape=(
-                input_size_per_partition,
-                output_size_per_partition,
-            ),
-            weight_type=self.quant_type,
-            act_type=params_dtype,
-            group_size=effective_group_size,
-            zero_points=False,
-            has_g_idx=False,
-        )
+        def make_config(act_type: torch.dtype) -> MPLinearLayerConfig:
+            return MPLinearLayerConfig(
+                full_weight_shape=(input_size, output_size),
+                partition_weight_shape=(
+                    input_size_per_partition,
+                    output_size_per_partition,
+                ),
+                weight_type=self.quant_type,
+                act_type=act_type,
+                group_size=effective_group_size,
+                zero_points=False,
+                has_g_idx=False,
+            )
 
-        kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+        # W4A8-INT means int8 activations; only fall back to weight-only
+        # (W4A16) execution when no int8-activation kernel exists, and say
+        # so (issue #38064: the fallback used to be silent). Non-CUDA
+        # platforms (e.g. XPU) quantize activations inside their kernels
+        # and keep the existing config unchanged. Static or asymmetric
+        # input schemes have no int8 kernel yet.
+        kernel_type = None
+        if current_platform.is_cuda():
+            if self.input_symmetric and not self.is_static_input_scheme:
+                try:
+                    mp_linear_kernel_config = make_config(torch.int8)
+                    kernel_type = choose_mp_linear_kernel(
+                        mp_linear_kernel_config
+                    )
+                except ValueError:
+                    logger.warning_once(
+                        "No int8-activation kernel for W4A8-INT on this "
+                        "platform; executing as W4A16 (weight-only). "
+                        "Activations will not be quantized."
+                    )
+            else:
+                logger.warning_once(
+                    "W4A8-INT with static or asymmetric input quantization "
+                    "has no int8-activation kernel; executing as W4A16 "
+                    "(weight-only). Activations will not be quantized."
+                )
+        if kernel_type is None:
+            mp_linear_kernel_config = make_config(params_dtype)
+            kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
         if kernel_type.__name__ not in self._kernel_backends_being_used:
             logger.info("Using %s for CompressedTensorsW4A8Int", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
